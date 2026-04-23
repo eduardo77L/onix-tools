@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TribalWars - Onix Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.9.7
+// @version      1.9.8
 // @description  Onix Tools
 // @author       korba4
 // @match        https://*.tribalwars.com.br/*
@@ -70,13 +70,13 @@
   }
 
   /**
-   * Lista de membros: select da página atual (uso oficial: Tribo → Membros → Defesa), ou fetch de fallback.
+   * Lista de membros: select da página atual (Tribo → Membros → Tropas), ou fetch de fallback.
    */
   async function getMembersListForTroops(villageId) {
     const fromDom = getMembersFromSelect();
     if (fromDom) return fromDom;
 
-    const modes = ["members_defense", "members_troops", "members"];
+    const modes = ["members_troops", "members"];
     for (const mode of modes) {
       try {
         const url = `/game.php?village=${encodeURIComponent(villageId)}&screen=ally&mode=${mode}`;
@@ -118,17 +118,17 @@
     return false;
   }
 
+  /** Tabela Membros → Tropas: cabeçalhos unit-item-* + linhas com link de aldeia. */
   function findTroopTable(doc) {
     let best = null;
+    let bestScore = -1;
     doc.querySelectorAll("table").forEach((t) => {
-      const low = normalizeCellText(t.textContent);
-      if (
-        low.includes("na aldeia") ||
-        low.includes("na vila") ||
-        low.includes("tropas na aldeia") ||
-        low.includes("a caminho") ||
-        low.includes("à caminho")
-      ) {
+      const unitTh = t.querySelectorAll("th[class*='unit-item']");
+      if (unitTh.length < 6) return;
+      const villageLinks = t.querySelectorAll('td a[href*="info_village"]');
+      const score = unitTh.length + villageLinks.length * 10;
+      if (score > bestScore) {
+        bestScore = score;
         best = t;
       }
     });
@@ -178,7 +178,7 @@
   /** Usa cabeçalhos unit-item-* do TW quando existirem (colunas alinham com a linha de dados). */
   function tryParseTroopRowFromUnitHeaders(table, cells) {
     const headerRow = Array.from(table.querySelectorAll("tr")).find(
-      (tr) => tr.querySelectorAll("th[class*='unit-item']").length >= 8,
+      (tr) => tr.querySelectorAll("th[class*='unit-item']").length >= 6,
     );
     if (!headerRow) return null;
 
@@ -190,8 +190,7 @@
       const key   = UNIT_ITEM_CLASS_MAP[token];
       if (key) colToKey[th.cellIndex] = key;
     });
-    if (Object.keys(colToKey).length < 8) return null;
-    if (!Object.values(colToKey).includes("snob")) return null;
+    if (Object.keys(colToKey).length < 6) return null;
 
     const o     = emptyTroops();
     let matched = 0;
@@ -231,7 +230,7 @@
   }
 
   /**
-   * Extrai contagens da linha da tabela TW (Membros/Defesa).
+   * Extrai contagens da linha da tabela TW (Membros/Defesa — layout antigo com “Na aldeia” / “A caminho”).
    * Preferência: classes unit-item-* no cabeçalho. Senão: cauda fixa (… HC, aríete, catapulta, paladino, nobre)
    * + prefixo por quantidade de colunas (mundos com batedor/arqueiro/cav. montada).
    */
@@ -348,26 +347,51 @@
     }));
   }
 
+  /** Membros → Tropas: uma linha por aldeia, contagens via cabeçalhos unit-item-*. */
+  function parseMembersTroopsFlatTable(table, playerId, playerName) {
+    const byCoord = new Map();
+    table.querySelectorAll("tr").forEach((row) => {
+      const cells = row.querySelectorAll("td");
+      if (cells.length < 3) return;
+      const villageLink = row.querySelector('a[href*="info_village"]');
+      if (!villageLink) return;
+      const coordMatch = villageLink.textContent.match(/\((\d{1,3}\|\d{1,3})\)/);
+      const currentCoord = coordMatch ? coordMatch[1] : "";
+      if (!currentCoord) return;
+      const counts = tryParseTroopRowFromUnitHeaders(table, cells);
+      if (!counts) return;
+      const travel = emptyTroops();
+      byCoord.set(currentCoord, {
+        memberId:        playerId,
+        memberName:      playerName,
+        villageCoord:    currentCoord,
+        troopsHome:      counts,
+        troopsTraveling: travel,
+        troops:          sumTroops(counts, travel),
+      });
+    });
+    return Array.from(byCoord.values());
+  }
+
   async function fetchMemberTroops(playerId, playerName, villageId) {
-    const modes = ["members_troops", "members_defense"];
-    for (const mode of modes) {
-      try {
-        const url =
-          `/game.php?village=${villageId}&screen=ally&mode=${mode}&player_id=${encodeURIComponent(playerId)}`;
-        const res  = await fetch(url);
-        const html = await res.text();
-        const doc  = new DOMParser().parseFromString(html, "text/html");
+    try {
+      const url =
+        `/game.php?village=${villageId}&screen=ally&mode=members_troops&player_id=${encodeURIComponent(playerId)}`;
+      const res  = await fetch(url);
+      const html = await res.text();
+      const doc  = new DOMParser().parseFromString(html, "text/html");
 
-        const table = findTroopTable(doc);
-        if (!table) continue;
+      const table = findTroopTable(doc);
+      if (!table) return [];
 
-        const villages = parseTroopTable(table, playerId, playerName);
-        if (villages.length > 0) return villages;
-      } catch (e) {
-        console.error("Erro ao buscar tropas do membro:", playerId, mode, e);
-      }
+      const flat = parseMembersTroopsFlatTable(table, playerId, playerName);
+      if (flat.length > 0) return flat;
+
+      return parseTroopTable(table, playerId, playerName);
+    } catch (e) {
+      console.error("Erro ao buscar tropas do membro:", playerId, e);
+      return [];
     }
-    return [];
   }
 
   async function uploadTroops(payload) {
@@ -902,12 +926,12 @@
                 <p style="margin-top:10px;"><strong style="color:#f1f5f9;">Critérios p/ Papa Strike:</strong><br>
                 Pop. usada &gt; 23.000 · Bárbaros ≥ 1.000 · Cav. leve ≥ 500 · 0 nobres · Aríetes &gt; 600</p>
                 <p style="margin-top:10px;color:#94a3b8;font-size:12px;">
-                  <strong style="color:#e2e8f0;">Pop. usada</strong> (por aldeia, Na aldeia + A caminho): <strong style="color:#e2e8f0;">3600</strong> (edifícios) + soma de <strong style="color:#e2e8f0;">todas</strong> as unidades:
+                  <strong style="color:#e2e8f0;">Pop. usada</strong> (por aldeia, a partir dos números da aba <strong style="color:#e2e8f0;">Membros → Tropas</strong>): <strong style="color:#e2e8f0;">3600</strong> (edifícios) + soma das unidades mostradas na tabela:
                   lança · espadachim · arqueiro · bárbaro <strong>1</strong> · batedor <strong>2</strong> · cav. leve <strong>4</strong> · cav. arqueira <strong>5</strong> · cav. pesada <strong>6</strong> · aríete <strong>5</strong> · catapulta <strong>8</strong> · paladino <strong>10</strong> · nobre <strong>100</strong>.
-                  Nos cards, <strong style="color:#e2e8f0;">Pop. usada (soma)</strong> = soma dessa pop. em todas as aldeias do recorte (na aldeia / a caminho / total).
+                  Nos cards, <strong style="color:#e2e8f0;">Pop. usada (soma)</strong> = soma dessa pop. em todas as aldeias do recorte.
                 </p>
                 <p style="margin-top:10px;color:#fbbf24;font-size:12px;">
-                  <strong style="color:#fef3c7;">Obrigatório:</strong> abra <strong style="color:#fef3c7;">Tribo → Membros → Defesa</strong> no jogo antes de usar <strong style="color:#fef3c7;">Buscar Tropas</strong>.
+                  <strong style="color:#fef3c7;">Obrigatório:</strong> abra <strong style="color:#fef3c7;">Tribo → Membros → Tropas</strong> no jogo antes de usar <strong style="color:#fef3c7;">Buscar Tropas</strong> (o script usa <code style="color:#fef3c7;">mode=members_troops</code> por jogador).
                 </p>
               </div>
               <div class="onix-actions-row">
@@ -1067,7 +1091,7 @@
       if (!members || members.length === 0) {
         troopsStatus.style.color = "#ef4444";
         troopsStatus.textContent =
-          "Nenhum membro encontrado. Você precisa estar em Tribo → Membros → Defesa para esta busca.";
+          "Nenhum membro encontrado. Abra Tribo → Membros → Tropas (ou Membros) no jogo e tente de novo.";
         return;
       }
 
