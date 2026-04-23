@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TribalWars - Onix Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.9.5
+// @version      1.9.7
 // @description  Onix Tools
 // @author       korba4
 // @match        https://*.tribalwars.com.br/*
@@ -207,7 +207,7 @@
     return o;
   }
 
-  /** Layout antigo fixo (sem coluna de batedor na posição esperada). */
+  /** Layout clássico: colunas 1–10 = lança, espada, bárbaro, batedor, CL, CP, aríete, catapulta, paladino, nobre. */
   function parseTroopNumbersFixedLegacy(cells, labelIdx) {
     const getVal = (offsetFromFirstNumber) => {
       const idx = labelIdx + offsetFromFirstNumber;
@@ -218,7 +218,7 @@
       spearman:      getVal(1),
       swordsman:     getVal(2),
       axeman:        getVal(3),
-      scout:         0,
+      scout:         getVal(4),
       archer:        0,
       lightCavalry:  getVal(5),
       mountedArcher: 0,
@@ -402,17 +402,17 @@
   }
 
   /**
-   * População usada (fazenda) = soma das tropas × custo + 3.600 (edifícios) por aldeia.
-   * Custos: lança/espada/bárbaro/arco 1 · batedor 2 · cav. leve 4 · cav. montada 5 · cav. pesada 6 · aríete 5 · catapulta 8 · paladino 10 · nobre 100.
+   * Pop. total usada por aldeia = 3.600 (edifícios) + todas as tropas (Na aldeia + A caminho), custos TW:
+   * lança/espada/arqueiro/bárbaro ×1 · batedor ×2 · CL ×4 · cav. arqueira ×5 · CP ×6 · aríete ×5 · catapulta ×8 · paladino ×10 · nobre ×100.
    */
   function totalUsedPopulation(troops) {
     const t = troops || {};
     const fromUnits =
       (t.spearman || 0) * 1 +
       (t.swordsman || 0) * 1 +
+      (t.archer || 0) * 1 +
       (t.axeman || 0) * 1 +
       (t.scout || 0) * 2 +
-      (t.archer || 0) * 1 +
       (t.lightCavalry || 0) * 4 +
       (t.mountedArcher || 0) * 5 +
       (t.heavyCavalry || 0) * 6 +
@@ -460,13 +460,6 @@
     );
   }
 
-  /** Pop. “ataque” / “defesa” ponderada (cards) — só para somas nos cards, não para Full. */
-  function calculateMetrics(troops) {
-    const attackPop  = (troops.spearman || 0) + (troops.lightCavalry || 0) * 4 + (troops.ram || 0) * 5;
-    const defensePop = (troops.spearman || 0) + (troops.swordsman || 0) + (troops.heavyCavalry || 0) * 6;
-    return { attackPop, defensePop };
-  }
-
   function troopsHomeFromRecord(v) {
     if (v.troopsHome != null && typeof v.troopsHome === "object") return v.troopsHome;
     if (v.troops != null && typeof v.troops === "object") return v.troops;
@@ -484,16 +477,13 @@
   }
 
   function aggregateMemberStats(list, getTroopsForVillage) {
-    let popAtk = 0;
-    let popDef = 0;
-    let fullAtk = 0;
-    let fullDef = 0;
+    let popUsada = 0;
+    let fullAtk  = 0;
+    let fullDef  = 0;
     let papaStrike = 0;
     list.forEach((v) => {
       const slice = getTroopsForVillage(v);
-      const m = calculateMetrics(slice);
-      popAtk += m.attackPop;
-      popDef += m.defensePop;
+      popUsada += totalUsedPopulation(slice);
       const totalT = troopsTotalFromRecord(v);
       if (isFullAttackVillageTotal(totalT)) fullAtk++;
       if (isFullDefenseVillageTotal(totalT)) fullDef++;
@@ -501,8 +491,7 @@
     });
     return {
       villages: list.length,
-      popAtk,
-      popDef,
+      popUsada,
       fullAtk,
       fullDef,
       papaStrike,
@@ -535,8 +524,7 @@
             <div class="onix-card-title">${title}</div>
             ${sub}
             <div class="onix-card-row"><span>Aldeias</span><span class="value">${s.villages}</span></div>
-            <div class="onix-card-row"><span>Pop. Ataque</span><span class="value">${s.popAtk.toLocaleString("pt-BR")}</span></div>
-            <div class="onix-card-row"><span>Pop. Defesa</span><span class="value">${s.popDef.toLocaleString("pt-BR")}</span></div>
+            <div class="onix-card-row"><span>Pop. usada (soma)</span><span class="value">${s.popUsada.toLocaleString("pt-BR")}</span></div>
             ${nobleRow}
             ${fullRows}
           </div>`;
@@ -594,7 +582,7 @@
           ${renderTroopsMetricCard("A caminho", "Em marcha / retorno", travel, false, null)}
           ${renderTroopsMetricCard(
             "Total",
-            "Na aldeia + A caminho · Pop. usada inclui +3600 edifícios (ver caixa acima)",
+            "Na aldeia + A caminho · cada aldeia: +3600 + custos das tropas (ver caixa acima)",
             total,
             true,
             nobTotal,
@@ -913,14 +901,14 @@
                 Pop. usada &gt; 23.000 · Lanceiros &gt; 1000 · Espadachins &gt; 1000</p>
                 <p style="margin-top:10px;"><strong style="color:#f1f5f9;">Critérios p/ Papa Strike:</strong><br>
                 Pop. usada &gt; 23.000 · Bárbaros ≥ 1.000 · Cav. leve ≥ 500 · 0 nobres · Aríetes &gt; 600</p>
-                <!-- <p style="margin-top:10px;color:#94a3b8;font-size:12px;">
-                  É adicionado <strong style="color:#e2e8f0;">3600</strong> de população dos edifícios na soma <strong style="color:#e2e8f0;">de cada aldeia</strong>.
-                  <strong style="color:#e2e8f0;">Pop. usada</strong> = tropas (Na aldeia + A caminho) com:
-                  lança/espada/bárbaro/arco <strong>1</strong> · batedor <strong>2</strong> · cav. leve <strong>4</strong> · cav. montada <strong>5</strong> · cav. pesada <strong>6</strong> · aríete <strong>5</strong> · catapulta <strong>8</strong> · paladino <strong>10</strong> · nobre <strong>100</strong> + bônus.
-                </p> 
+                <p style="margin-top:10px;color:#94a3b8;font-size:12px;">
+                  <strong style="color:#e2e8f0;">Pop. usada</strong> (por aldeia, Na aldeia + A caminho): <strong style="color:#e2e8f0;">3600</strong> (edifícios) + soma de <strong style="color:#e2e8f0;">todas</strong> as unidades:
+                  lança · espadachim · arqueiro · bárbaro <strong>1</strong> · batedor <strong>2</strong> · cav. leve <strong>4</strong> · cav. arqueira <strong>5</strong> · cav. pesada <strong>6</strong> · aríete <strong>5</strong> · catapulta <strong>8</strong> · paladino <strong>10</strong> · nobre <strong>100</strong>.
+                  Nos cards, <strong style="color:#e2e8f0;">Pop. usada (soma)</strong> = soma dessa pop. em todas as aldeias do recorte (na aldeia / a caminho / total).
+                </p>
                 <p style="margin-top:10px;color:#fbbf24;font-size:12px;">
-                  <strong style="color:#fef3c7;">Obrigatório:</strong> abra <strong style="color:#fef3c7;">Tribo → Membros → Defesa</strong> no jogo antes de usar <strong style="color:#fef3c7;">Buscar Tropas</strong> (a busca depende dessa tela).
-                </p> -->
+                  <strong style="color:#fef3c7;">Obrigatório:</strong> abra <strong style="color:#fef3c7;">Tribo → Membros → Defesa</strong> no jogo antes de usar <strong style="color:#fef3c7;">Buscar Tropas</strong>.
+                </p>
               </div>
               <div class="onix-actions-row">
                 <button class="onix-btn-action" id="onix-btn-fetch-troops">🔄 Buscar Tropas</button>
