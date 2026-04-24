@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TribalWars - Onix Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.9.8
+// @version      1.9.16
 // @description  Onix Tools
 // @author       korba4
 // @match        https://*.tribalwars.com.br/*
@@ -48,7 +48,6 @@
     }
   }
 
-  /** Bônus fixo de população dos edifícios (fazenda) somado em cada aldeia, como no jogo. */
   const VILLAGE_BUILDING_POP_BONUS = 3600;
 
   function parseMembersFromDoc(doc) {
@@ -69,20 +68,17 @@
     return parseMembersFromDoc(document);
   }
 
-  /**
-   * Lista de membros: select da página atual (Tribo → Membros → Tropas), ou fetch de fallback.
-   */
   async function getMembersListForTroops(villageId) {
     const fromDom = getMembersFromSelect();
     if (fromDom) return fromDom;
 
-    const modes = ["members_troops", "members"];
+    const modes = ["members_troops", "members_defense", "members"];
     for (const mode of modes) {
       try {
-        const url = `/game.php?village=${encodeURIComponent(villageId)}&screen=ally&mode=${mode}`;
-        const res   = await fetch(url);
-        const html  = await res.text();
-        const doc   = new DOMParser().parseFromString(html, "text/html");
+        const url  = `/game.php?village=${encodeURIComponent(villageId)}&screen=ally&mode=${mode}`;
+        const res  = await fetch(url);
+        const html = await res.text();
+        const doc  = new DOMParser().parseFromString(html, "text/html");
         const parsed = parseMembersFromDoc(doc);
         if (parsed) return parsed;
       } catch (e) {
@@ -90,74 +86,6 @@
       }
     }
     return null;
-  }
-
-  function normalizeCellText(s) {
-    return (s || "").replace(/\s+/g, " ").trim().toLowerCase();
-  }
-
-  /** Rótulo da linha de tropas que estão na aldeia (varia por tradução / layout do TW BR). */
-  function isHomeVillageTroopRowLabel(text) {
-    const n = normalizeCellText(text);
-    if (!n) return false;
-    if (n === "na aldeia" || n === "na vila") return true;
-    if (n.includes("na aldeia") || n.includes("na vila")) return true;
-    if (n.includes("tropas na aldeia") || n.includes("tropas na vila")) return true;
-    if (n.includes("em casa") || n === "presente") return true;
-    return false;
-  }
-
-  /** Segunda linha de tropas por aldeia (em marcha / retorno). */
-  function isTravelingTroopRowLabel(text) {
-    const n = normalizeCellText(text);
-    if (!n) return false;
-    if (n === "a caminho" || n === "à caminho") return true;
-    if (n.includes("a caminho") || n.includes("à caminho")) return true;
-    if (n.includes("em caminho")) return true;
-    if (n.includes("trânsito") || n.includes("transito")) return true;
-    return false;
-  }
-
-  /** Tabela Membros → Tropas: cabeçalhos unit-item-* + linhas com link de aldeia. */
-  function findTroopTable(doc) {
-    let best = null;
-    let bestScore = -1;
-    doc.querySelectorAll("table").forEach((t) => {
-      const unitTh = t.querySelectorAll("th[class*='unit-item']");
-      if (unitTh.length < 6) return;
-      const villageLinks = t.querySelectorAll('td a[href*="info_village"]');
-      const score = unitTh.length + villageLinks.length * 10;
-      if (score > bestScore) {
-        bestScore = score;
-        best = t;
-      }
-    });
-    return best;
-  }
-
-  function emptyTroops() {
-    return {
-      spearman:      0,
-      swordsman:     0,
-      axeman:        0,
-      scout:         0,
-      archer:        0,
-      lightCavalry:  0,
-      mountedArcher: 0,
-      heavyCavalry:  0,
-      ram:           0,
-      catapult:      0,
-      knight:        0,
-      snob:          0,
-    };
-  }
-
-  function sumTroops(a, b) {
-    const o = emptyTroops();
-    Object.keys(o).forEach((k) => {
-      o[k] = (a[k] || 0) + (b[k] || 0);
-    });
-    return o;
   }
 
   const UNIT_ITEM_CLASS_MAP = {
@@ -173,265 +101,109 @@
     catapult: "catapult",
     knight:   "knight",
     snob:     "snob",
+    militia:  "militia",
   };
 
-  /** Usa cabeçalhos unit-item-* do TW quando existirem (colunas alinham com a linha de dados). */
-  function tryParseTroopRowFromUnitHeaders(table, cells) {
-    const headerRow = Array.from(table.querySelectorAll("tr")).find(
-      (tr) => tr.querySelectorAll("th[class*='unit-item']").length >= 6,
-    );
-    if (!headerRow) return null;
-
-    const colToKey = {};
-    headerRow.querySelectorAll("th").forEach((th) => {
-      const m = /unit-item-([a-z0-9_]+)/i.exec(th.className || "");
-      if (!m) return;
-      const token = m[1].toLowerCase();
-      const key   = UNIT_ITEM_CLASS_MAP[token];
-      if (key) colToKey[th.cellIndex] = key;
-    });
-    if (Object.keys(colToKey).length < 6) return null;
-
-    const o     = emptyTroops();
-    let matched = 0;
-    for (let i = 0; i < cells.length; i++) {
-      const td = cells[i];
-      const key = colToKey[td.cellIndex];
-      if (!key) continue;
-      const txt = (td.textContent || "").trim().replace(/\D/g, "");
-      o[key] = parseInt(txt || "0") || 0;
-      matched++;
+  function thToTroopColumnKey(th) {
+    const mClass = /unit-item-([a-z0-9_]+)/i.exec(th.className || "");
+    if (mClass) {
+      const key = UNIT_ITEM_CLASS_MAP[mClass[1].toLowerCase()];
+      if (key) return key;
     }
-    if (matched < 6) return null;
-    return o;
+    const img = th.querySelector("img[src]");
+    if (!img) return null;
+    const src = img.getAttribute("src") || "";
+    const m = /unit_(spear|sword|axe|spy|archer|light|heavy|marcher|ram|catapult|knight|snob|militia)\.(?:webp|png|gif)/i.exec(src);
+    if (!m) return null;
+    return UNIT_ITEM_CLASS_MAP[m[1].toLowerCase()] || null;
   }
 
-  /** Layout clássico: colunas 1–10 = lança, espada, bárbaro, batedor, CL, CP, aríete, catapulta, paladino, nobre. */
-  function parseTroopNumbersFixedLegacy(cells, labelIdx) {
-    const getVal = (offsetFromFirstNumber) => {
-      const idx = labelIdx + offsetFromFirstNumber;
-      const txt = (cells[idx]?.textContent || "").trim().replace(/\D/g, "");
-      return parseInt(txt || "0") || 0;
-    };
+  function findTroopTable(doc) {
+    let best = null;
+    let bestScore = -1;
+    doc.querySelectorAll("table").forEach((t) => {
+      const villageLinksCount = t.querySelectorAll('td a[href*="info_village"]').length;
+      if (villageLinksCount > bestScore) {
+        bestScore = villageLinksCount;
+        best = t;
+      }
+    });
+    return best;
+  }
+
+  function findMembersTroopsTable(doc) {
+    const t = doc.querySelector("table.vis.w100");
+    if (t && t.querySelector("th") && t.querySelector('td a[href*="info_village"]')) return t;
+    return findTroopTable(doc);
+  }
+
+  function emptyTroops() {
     return {
-      spearman:      getVal(1),
-      swordsman:     getVal(2),
-      axeman:        getVal(3),
-      scout:         getVal(4),
-      archer:        0,
-      lightCavalry:  getVal(5),
-      mountedArcher: 0,
-      heavyCavalry:  getVal(6),
-      ram:           getVal(7),
-      catapult:      getVal(8),
-      knight:        getVal(9),
-      snob:          getVal(10),
+      spearman: 0, swordsman: 0, axeman: 0, scout: 0, archer: 0,
+      lightCavalry: 0, mountedArcher: 0, heavyCavalry: 0,
+      ram: 0, catapult: 0, knight: 0, snob: 0, militia: 0,
     };
   }
 
-  /**
-   * Extrai contagens da linha da tabela TW (Membros/Defesa — layout antigo com “Na aldeia” / “A caminho”).
-   * Preferência: classes unit-item-* no cabeçalho. Senão: cauda fixa (… HC, aríete, catapulta, paladino, nobre)
-   * + prefixo por quantidade de colunas (mundos com batedor/arqueiro/cav. montada).
-   */
-  function parseTroopNumbersFromRow(cells, labelIdx) {
-    const nums = [];
-    for (let i = labelIdx + 1; i < cells.length; i++) {
-      const txt = (cells[i]?.textContent || "").trim().replace(/\D/g, "");
-      nums.push(parseInt(txt || "0") || 0);
-    }
-    const n = nums.length;
-    const o = emptyTroops();
-    if (n === 0) return o;
+  function getUnitKeysFromTable(table) {
+    const keysByIndex = {};
+    const headerRow = Array.from(table.querySelectorAll("tr")).find((tr) =>
+      Array.from(tr.querySelectorAll("th")).some((th) => thToTroopColumnKey(th) !== null),
+    );
+    if (!headerRow) return keysByIndex;
 
-    const table = cells[0] && cells[0].closest("table");
-    if (table) {
-      const fromHdr = tryParseTroopRowFromUnitHeaders(table, cells);
-      if (fromHdr) return fromHdr;
-    }
-
-    if (n < 9) return parseTroopNumbersFixedLegacy(cells, labelIdx);
-
-    o.snob          = nums[n - 1];
-    o.knight        = nums[n - 2];
-    o.catapult      = nums[n - 3];
-    o.ram           = nums[n - 4];
-    o.heavyCavalry  = nums[n - 5];
-    const prefix    = nums.slice(0, n - 5);
-    const m         = prefix.length;
-
-    if (m === 7) {
-      o.spearman = prefix[0];
-      o.swordsman = prefix[1];
-      o.axeman = prefix[2];
-      o.scout = prefix[3];
-      o.archer = prefix[4];
-      o.lightCavalry = prefix[5];
-      o.mountedArcher = prefix[6];
-    } else if (m === 6) {
-      o.spearman = prefix[0];
-      o.swordsman = prefix[1];
-      o.axeman = prefix[2];
-      o.scout = prefix[3];
-      o.archer = prefix[4];
-      o.lightCavalry = prefix[5];
-    } else if (m === 5) {
-      o.spearman = prefix[0];
-      o.swordsman = prefix[1];
-      o.axeman = prefix[2];
-      o.scout = prefix[3];
-      o.lightCavalry = prefix[4];
-    } else if (m === 4) {
-      o.spearman = prefix[0];
-      o.swordsman = prefix[1];
-      o.axeman = prefix[2];
-      o.lightCavalry = prefix[3];
-    } else {
-      return parseTroopNumbersFixedLegacy(cells, labelIdx);
-    }
-    return o;
-  }
-
-  function parseTroopTable(table, playerId, playerName) {
-    const rows    = table.querySelectorAll("tr");
-    const byCoord = new Map();
-    let currentCoord = "";
-
-    rows.forEach((row) => {
-      const cells = row.querySelectorAll("td");
-      if (cells.length < 2) return;
-
-      const villageLink = row.querySelector('a[href*="info_village"]');
-      if (villageLink) {
-        const coordMatch = villageLink.textContent.match(/\((\d{1,3}\|\d{1,3})\)/);
-        currentCoord = coordMatch ? coordMatch[1] : villageLink.textContent.trim();
-      }
-
-      if (!currentCoord) return;
-
-      let labelIdx = -1;
-      let rowKind  = null;
-      for (let i = 0; i < Math.min(cells.length, 6); i++) {
-        const raw = cells[i]?.textContent;
-        if (isHomeVillageTroopRowLabel(raw)) {
-          labelIdx = i;
-          rowKind  = "home";
-          break;
-        }
-        if (isTravelingTroopRowLabel(raw)) {
-          labelIdx = i;
-          rowKind  = "travel";
-          break;
-        }
-      }
-      if (labelIdx < 0 || !rowKind) return;
-
-      const counts = parseTroopNumbersFromRow(cells, labelIdx);
-      if (!byCoord.has(currentCoord)) {
-        byCoord.set(currentCoord, {
-          memberId:          playerId,
-          memberName:        playerName,
-          villageCoord:      currentCoord,
-          troopsHome:        emptyTroops(),
-          troopsTraveling:   emptyTroops(),
-        });
-      }
-      const slot = byCoord.get(currentCoord);
-      if (rowKind === "home") slot.troopsHome = counts;
-      else slot.troopsTraveling = counts;
+    headerRow.querySelectorAll("th").forEach((th) => {
+      const key = thToTroopColumnKey(th);
+      if (key) keysByIndex[th.cellIndex] = key;
     });
-
-    return Array.from(byCoord.values()).map((v) => ({
-      ...v,
-      troops: sumTroops(v.troopsHome, v.troopsTraveling),
-    }));
+    return keysByIndex;
   }
 
-  /** Membros → Tropas: uma linha por aldeia, contagens via cabeçalhos unit-item-*. */
-  function parseMembersTroopsFlatTable(table, playerId, playerName) {
-    const byCoord = new Map();
+  function parseMembersTroopsHtml(html, memberId, memberName) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const table = findMembersTroopsTable(doc);
+    if (!table) return [];
+
+    const keysByIndex = getUnitKeysFromTable(table);
+    if (Object.keys(keysByIndex).length === 0) return [];
+
+    const out = [];
     table.querySelectorAll("tr").forEach((row) => {
-      const cells = row.querySelectorAll("td");
-      if (cells.length < 3) return;
-      const villageLink = row.querySelector('a[href*="info_village"]');
-      if (!villageLink) return;
-      const coordMatch = villageLink.textContent.match(/\((\d{1,3}\|\d{1,3})\)/);
-      const currentCoord = coordMatch ? coordMatch[1] : "";
-      if (!currentCoord) return;
-      const counts = tryParseTroopRowFromUnitHeaders(table, cells);
-      if (!counts) return;
-      const travel = emptyTroops();
-      byCoord.set(currentCoord, {
-        memberId:        playerId,
-        memberName:      playerName,
-        villageCoord:    currentCoord,
-        troopsHome:      counts,
-        troopsTraveling: travel,
-        troops:          sumTroops(counts, travel),
+      const link = row.querySelector('td a[href*="info_village"]');
+      if (!link) return;
+      const linkText = (link.textContent || "").trim();
+      const coordMatch = linkText.match(/\d{1,3}\|\d{1,3}/);
+      const coord = coordMatch ? coordMatch[0] : linkText;
+      const troops = emptyTroops();
+      row.querySelectorAll("td").forEach((td) => {
+        const key = keysByIndex[td.cellIndex];
+        if (!key) return;
+        const raw = (td.textContent || "").replace(/[^\d-]/g, "");
+        const val = parseInt(raw || "0", 10);
+        troops[key] = Number.isFinite(val) ? val : 0;
       });
+      out.push({ villageCoord: coord, memberId, memberName, troops });
     });
-    return Array.from(byCoord.values());
+    return out;
   }
 
-  async function fetchMemberTroops(playerId, playerName, villageId) {
-    try {
-      const url =
-        `/game.php?village=${villageId}&screen=ally&mode=members_troops&player_id=${encodeURIComponent(playerId)}`;
-      const res  = await fetch(url);
-      const html = await res.text();
-      const doc  = new DOMParser().parseFromString(html, "text/html");
-
-      const table = findTroopTable(doc);
-      if (!table) return [];
-
-      const flat = parseMembersTroopsFlatTable(table, playerId, playerName);
-      if (flat.length > 0) return flat;
-
-      return parseTroopTable(table, playerId, playerName);
-    } catch (e) {
-      console.error("Erro ao buscar tropas do membro:", playerId, e);
-      return [];
-    }
-  }
-
-  async function uploadTroops(payload) {
-    try {
-      const res = await fetch(`${API_BASE}/troops/update`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(payload),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        return {
-          ok:    false,
-          error: data.error || `HTTP ${res.status}`,
-        };
-      }
-      return data;
-    } catch (e) {
-      console.error("Erro ao enviar tropas:", e);
-      return { ok: false, error: e.message };
-    }
-  }
-
-  async function getTroopsData(tribeId) {
-    try {
-      const res = await fetch(`${API_BASE}/troops/tribe/${encodeURIComponent(tribeId)}`);
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return await res.json();
-    } catch (e) {
-      return { troops: [], lastUpdated: null };
-    }
+  async function fetchMembersTroopsHtml(villageId, playerId) {
+    const qs =
+      playerId != null && playerId !== ""
+        ? `village=${encodeURIComponent(villageId)}&screen=ally&mode=members_troops&player_id=${encodeURIComponent(playerId)}`
+        : `village=${encodeURIComponent(villageId)}&screen=ally&mode=members_troops`;
+    const res = await fetch(`/game.php?${qs}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return res.text();
   }
 
   /**
-   * Pop. total usada por aldeia = 3.600 (edifícios) + todas as tropas (Na aldeia + A caminho), custos TW:
-   * lança/espada/arqueiro/bárbaro ×1 · batedor ×2 · CL ×4 · cav. arqueira ×5 · CP ×6 · aríete ×5 · catapulta ×8 · paladino ×10 · nobre ×100.
+   * Custos de população por unidade (milícia não consome pop neste cálculo).
+   * Lanceiro, espada, bárbaro, arqueiro: 1 · Scout: 2 · Cav. leve: 4 · Cav. arqueira: 5 · Cav. pesada: 6 · Aríete: 5 · Catapulta: 8 · Paladino: 10 · Nobre: 100
    */
-  function totalUsedPopulation(troops) {
+  function troopsPopulationCost(troops) {
     const t = troops || {};
-    const fromUnits =
+    return (
       (t.spearman || 0) * 1 +
       (t.swordsman || 0) * 1 +
       (t.archer || 0) * 1 +
@@ -443,175 +215,211 @@
       (t.ram || 0) * 5 +
       (t.catapult || 0) * 8 +
       (t.knight || 0) * 10 +
-      (t.snob || 0) * 100;
-    return fromUnits + VILLAGE_BUILDING_POP_BONUS;
-  }
-
-  /** Full Ataque (por aldeia): pop. usada > 23k, critérios nas tropas totais (na aldeia + a caminho). */
-  function isFullAttackVillageTotal(troops) {
-    const t = troops || {};
-    const pop = totalUsedPopulation(t);
-    return (
-      pop > 23000 &&
-      (t.axeman || 0) >= 1000 &&
-      (t.lightCavalry || 0) >= 500 &&
-      (t.snob || 0) === 0 &&
-      (t.ram || 0) < 400
+      (t.snob || 0) * 100 +
+      (t.militia || 0) * 0
     );
   }
 
-  /** Full Defesa (por aldeia): pop. usada > 23k, lança/espada > 1000. */
-  function isFullDefenseVillageTotal(troops) {
-    const t = troops || {};
-    const pop = totalUsedPopulation(t);
-    return (
-      pop > 23000 &&
-      (t.spearman || 0) > 1000 &&
-      (t.swordsman || 0) > 1000
-    );
+  function sumTroopUnitCount(troops) {
+    const t = troops || emptyTroops();
+    let n = 0;
+    Object.keys(emptyTroops()).forEach((k) => { n += t[k] || 0; });
+    return n;
   }
 
-  /** Papa Strike (por aldeia): como Full Ataque, mas aríetes &gt; 600 em vez de &lt; 400. */
-  function isPapaStrikeVillageTotal(troops) {
-    const t = troops || {};
-    const pop = totalUsedPopulation(t);
-    return (
-      pop > 23000 &&
-      (t.axeman || 0) >= 1000 &&
-      (t.lightCavalry || 0) >= 500 &&
-      (t.snob || 0) === 0 &&
-      (t.ram || 0) > 600
-    );
+  /** Pop usada por aldeia: 3600 + tropas (dados da aba Tribo → Membros → Tropas, incluindo fora da aldeia). */
+  function villageUsedPopFromTotals(troops) {
+    return VILLAGE_BUILDING_POP_BONUS + troopsPopulationCost(troops);
   }
 
-  function troopsHomeFromRecord(v) {
-    if (v.troopsHome != null && typeof v.troopsHome === "object") return v.troopsHome;
-    if (v.troops != null && typeof v.troops === "object") return v.troops;
-    return emptyTroops();
-  }
+  const FULL_POP_MIN = 22000;
 
-  function troopsTravelFromRecord(v) {
-    return v.troopsTraveling != null && typeof v.troopsTraveling === "object"
-      ? v.troopsTraveling
-      : emptyTroops();
-  }
+  /**
+   * Full Ataque: pop > 22k · bárbaros > 1000 · cav leve ≥ 500 · nobres = 0 · aríetes < 400
+   * Full Defesa: pop > 22k · lanças > 500 · espadas > 500
+   * Papa: pop > 22k · bárbaros > 500 · cav leve ≥ 500 · aríetes > 400
+   */
+  function classifyMemberTroopsRow(troops) {
+    const t = troops || emptyTroops();
+    const pop = villageUsedPopFromTotals(t);
+    const spear = t.spearman || 0;
+    const sword = t.swordsman || 0;
+    const axe = t.axeman || 0;
+    const light = t.lightCavalry || 0;
+    const nob = t.snob || 0;
+    const ram = t.ram || 0;
 
-  function troopsTotalFromRecord(v) {
-    return sumTroops(troopsHomeFromRecord(v), troopsTravelFromRecord(v));
-  }
+    const fullAtk =
+      pop > FULL_POP_MIN &&
+      axe > 1000 &&
+      light >= 500 &&
+      nob === 0 &&
+      ram < 400;
+    const fullDef =
+      pop > FULL_POP_MIN &&
+      spear > 500 &&
+      sword > 500;
+    const papaStrike =
+      pop > FULL_POP_MIN &&
+      axe > 500 &&
+      light >= 500 &&
+      ram > 400;
 
-  function aggregateMemberStats(list, getTroopsForVillage) {
-    let popUsada = 0;
-    let fullAtk  = 0;
-    let fullDef  = 0;
-    let papaStrike = 0;
-    list.forEach((v) => {
-      const slice = getTroopsForVillage(v);
-      popUsada += totalUsedPopulation(slice);
-      const totalT = troopsTotalFromRecord(v);
-      if (isFullAttackVillageTotal(totalT)) fullAtk++;
-      if (isFullDefenseVillageTotal(totalT)) fullDef++;
-      if (isPapaStrikeVillageTotal(totalT)) papaStrike++;
-    });
     return {
-      villages: list.length,
-      popUsada,
+      pop,
+      popTroopCost: troopsPopulationCost(t),
+      unitCount: sumTroopUnitCount(t),
+      total: t,
       fullAtk,
       fullDef,
       papaStrike,
     };
   }
 
-  function sumNobresTotal(list) {
-    let n = 0;
-    list.forEach((v) => {
-      n += troopsTotalFromRecord(v).snob || 0;
+  function analyzeVillageRecords(records) {
+    const villages = records.length;
+    let popTroopSum = 0;
+    let popTotalSum = 0;
+    let unitSum = 0;
+    let fullAtk = 0;
+    let fullDef = 0;
+    let papaStrike = 0;
+    let nobSum = 0;
+
+    records.forEach((rec) => {
+      const c = classifyMemberTroopsRow(rec.troops);
+      popTroopSum += c.popTroopCost;
+      popTotalSum += c.pop;
+      unitSum += c.unitCount;
+      nobSum += rec.troops.snob || 0;
+      if (c.fullAtk) fullAtk++;
+      if (c.fullDef) fullDef++;
+      if (c.papaStrike) papaStrike++;
     });
-    return n;
+
+    const sample = [];
+    records.forEach((rec) => {
+      const c = classifyMemberTroopsRow(rec.troops);
+      const near = c.pop > FULL_POP_MIN - 4000 && c.pop < FULL_POP_MIN + 8000;
+      if (c.fullAtk || c.fullDef || c.papaStrike || near) {
+        const t = c.total;
+        sample.push({
+          coord: rec.villageCoord,
+          pop: c.pop,
+          fullAtk: c.fullAtk,
+          fullDef: c.fullDef,
+          papa: c.papaStrike,
+          spear: t.spearman || 0,
+          sword: t.swordsman || 0,
+          axe: t.axeman || 0,
+          light: t.lightCavalry || 0,
+          ram: t.ram || 0,
+          nob: t.snob || 0,
+        });
+      }
+    });
+    sample.sort((a, b) => b.pop - a.pop);
+
+    const lines = [];
+    lines.push(`Onix Tropas (members_troops) — aldeias: ${villages} · pop/aldeia: ${VILLAGE_BUILDING_POP_BONUS} + custo tropas · limite Full: >${FULL_POP_MIN}`);
+    lines.push("coord | pop | FA | FD | P | lan esp bar cl ari nob");
+    sample.slice(0, 50).forEach((r) => {
+      lines.push(
+        `${r.coord} | ${r.pop} | ${r.fullAtk ? "sim" : "não"} | ${r.fullDef ? "sim" : "não"} | ${r.papa ? "sim" : "não"} | ` +
+        `${r.spear} ${r.sword} ${r.axe} ${r.light} ${r.ram} ${r.nob}`,
+      );
+    });
+    if (sample.length === 0) lines.push("(nenhuma aldeia no recorte de debug)");
+
+    const debugText = lines.join("\n");
+    console.info("[Onix Tropas members_troops]", { villages, fullAtk, fullDef, papaStrike, popTotalSum });
+
+    return {
+      villages,
+      popTroopSum,
+      popTotalSum,
+      unitSum,
+      fullAtk,
+      fullDef,
+      papaStrike,
+      nobSum,
+      debugText,
+    };
   }
 
-  function renderTroopsMetricCard(title, subtitle, s, showFull, nobresTotal) {
-    const sub = subtitle
-      ? `<div class="onix-card-sub">${subtitle}</div>`
-      : "";
-    const nobleRow =
-      showFull && nobresTotal != null
-        ? `<div class="onix-card-row"><span>Nobres</span><span class="value">${nobresTotal.toLocaleString("pt-BR")}</span></div>`
-        : "";
-    const fullRows = showFull
-      ? `<div class="onix-card-row"><span>Full Ataques</span><span class="value">${s.fullAtk}</span></div>
-            <div class="onix-card-row"><span>Full Defesas</span><span class="value">${s.fullDef}</span></div>
-            <div class="onix-card-row"><span>Papa Strike</span><span class="value">${s.papaStrike}</span></div>`
-      : "";
+  function formatTribeTroopsSummary(tribe) {
+    return (
+      `Fonte: Tribo → Membros → Tropas (fetch no jogo, inclui tropas fora da aldeia)\n` +
+      `Membros analisados: ${tribe.memberCount} · Aldeias: ${tribe.villages}\n` +
+      `Full Ataques (aldeias): ${tribe.fullAtk}\n` +
+      `Full Defesas (aldeias): ${tribe.fullDef}\n` +
+      `Papa Strikes (aldeias): ${tribe.papaStrike}`
+    );
+  }
+
+  function renderMemberTroopsCard(name, a) {
     return `
-          <div class="onix-card">
-            <div class="onix-card-title">${title}</div>
-            ${sub}
-            <div class="onix-card-row"><span>Aldeias</span><span class="value">${s.villages}</span></div>
-            <div class="onix-card-row"><span>Pop. usada (soma)</span><span class="value">${s.popUsada.toLocaleString("pt-BR")}</span></div>
-            ${nobleRow}
-            ${fullRows}
-          </div>`;
+      <div class="onix-troops-member-head">${name}</div>
+      <div class="onix-troops-cards">
+        <div class="onix-card">
+          <div class="onix-card-title">Resumo</div>
+          <div class="onix-card-sub">3600 + custo de tropas por aldeia (aba Tropas da tribo)</div>
+          <div class="onix-card-row"><span>Aldeias</span><span class="value">${a.villages}</span></div>
+          <div class="onix-card-row"><span>Pop. total (soma)</span><span class="value">${a.popTotalSum.toLocaleString("pt-BR")}</span></div>
+          <div class="onix-card-row"><span>Tropas (soma unidades)</span><span class="value">${a.unitSum.toLocaleString("pt-BR")}</span></div>
+          <div class="onix-card-row"><span>Nobres (total)</span><span class="value">${a.nobSum.toLocaleString("pt-BR")}</span></div>
+          <div class="onix-card-row"><span>Full Ataques</span><span class="value">${a.fullAtk}</span></div>
+          <div class="onix-card-row"><span>Full Defesas</span><span class="value">${a.fullDef}</span></div>
+          <div class="onix-card-row"><span>Papa Strikes</span><span class="value">${a.papaStrike}</span></div>
+        </div>
+      </div>
+      <label class="onix-debug-label">Debug (amostra)</label>
+      <textarea id="onix-member-debug" class="onix-troops-debug" readonly spellcheck="false"></textarea>`;
   }
 
-  function renderTroopsMemberSelect(troops, selectEl, infoEl) {
+  function wireTroopsAnalysisSelect(state, selectEl, infoEl, tribeSummaryEl) {
     selectEl.innerHTML = "";
+    if (tribeSummaryEl) tribeSummaryEl.value = formatTribeTroopsSummary(state.tribe);
 
-    if (!troops || troops.length === 0) {
+    if (!state.members || state.members.length === 0) {
       const opt = document.createElement("option");
       opt.value = "";
-      opt.textContent = "Nenhum dado disponível";
+      opt.textContent = "Nenhum membro analisado";
       selectEl.appendChild(opt);
       infoEl.innerHTML = "";
       return;
     }
 
-    const byMember = {};
-    troops.forEach((t) => {
-      if (!byMember[t.memberName]) byMember[t.memberName] = [];
-      byMember[t.memberName].push(t);
-    });
+    const def = document.createElement("option");
+    def.value = "";
+    def.textContent = "Selecione um membro";
+    selectEl.appendChild(def);
 
-    const defaultOpt = document.createElement("option");
-    defaultOpt.value = "";
-    defaultOpt.textContent = "Selecione um membro";
-    selectEl.appendChild(defaultOpt);
-
-    Object.keys(byMember).sort((a, b) => a.localeCompare(b)).forEach((name) => {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      selectEl.appendChild(opt);
-    });
+    state.members
+      .slice()
+      .sort((a, b) => (a.memberName || "").localeCompare(b.memberName || "", "pt-BR"))
+      .forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = String(m.memberId);
+        opt.textContent = `${m.memberName} (${m.records.length} aldeias)`;
+        selectEl.appendChild(opt);
+      });
 
     infoEl.innerHTML = "";
-
     selectEl.onchange = () => {
-      const name = selectEl.value;
-      if (!name) {
+      const id = selectEl.value;
+      if (!id) {
         infoEl.innerHTML = "";
         return;
       }
-
-      const list     = byMember[name];
-      const home     = aggregateMemberStats(list, troopsHomeFromRecord);
-      const travel   = aggregateMemberStats(list, troopsTravelFromRecord);
-      const total    = aggregateMemberStats(list, troopsTotalFromRecord);
-      const nobTotal = sumNobresTotal(list);
-
-      infoEl.innerHTML = `
-        <div class="onix-troops-member-head">${name}</div>
-        <div class="onix-troops-cards">
-          ${renderTroopsMetricCard("Na aldeia", "Só tropas estacionadas na aldeia", home, false, null)}
-          ${renderTroopsMetricCard("A caminho", "Em marcha / retorno", travel, false, null)}
-          ${renderTroopsMetricCard(
-            "Total",
-            "Na aldeia + A caminho · cada aldeia: +3600 + custos das tropas (ver caixa acima)",
-            total,
-            true,
-            nobTotal,
-          )}
-        </div>`;
+      const m = state.members.find((x) => String(x.memberId) === id);
+      if (!m) {
+        infoEl.innerHTML = "";
+        return;
+      }
+      infoEl.innerHTML = renderMemberTroopsCard(m.memberName, m.analyze);
+      const dbg = infoEl.querySelector("#onix-member-debug");
+      if (dbg) dbg.value = m.analyze.debugText;
     };
   }
 
@@ -627,355 +435,246 @@
     try {
       const res  = await fetch(`/game.php?screen=api&ajax=target_selection&input=${coord}`);
       const data = await res.json();
-      if (data && data.villages && data.villages.length > 0) return data.villages[0].id;
+      if (data && data.villages && data.villages.length > 0) {
+        return data.villages[0].id;
+      }
     } catch (e) {}
     return null;
   }
 
-  async function fetchCommandsForVillage(villageId, countReturns) {
+  async function fetchCommandsForVillage(villageId) {
     try {
-      const res  = await fetch(`/game.php?screen=info_village&id=${villageId}`);
+      const res  = await fetch(`/game.php?village=${villageId}&screen=overview`);
       const html = await res.text();
       const doc  = new DOMParser().parseFromString(html, "text/html");
-      const commandRows  = doc.querySelectorAll("#commands_outgoings tr.command-row");
-      const commandsData = [];
+      const commands = [];
+      doc.querySelectorAll('#show_incoming_units tr.command-row').forEach(tr => {
+        const typeImg = tr.querySelector('td:first-child img');
+        if (!typeImg) return;
+        const src = typeImg.getAttribute('src') || '';
+        let type = 'peq';
+        if (src.includes('attack_medium')) type = 'med';
+        else if (src.includes('attack_large')) type = 'grd';
+        else if (src.includes('snob')) type = 'nob';
 
-      commandRows.forEach((row) => {
-        const isReturning =
-          row.querySelector("img[src*='return']") !== null ||
-          row.querySelector("img[src*='cancel']") !== null;
-        if (!countReturns && isReturning) return;
-
-        let playerName   = game_data.player.name;
-        const playerLink = row.querySelector("a[href*='screen=info_player']");
-        if (playerLink) {
-          playerName = playerLink.textContent.trim();
-        } else {
-          const cmdLink = row.querySelector("a[href*='screen=info_command']");
-          if (cmdLink) {
-            const text = cmdLink.textContent.trim();
-            const idx  = text.indexOf(":");
-            if (idx > 0 && idx < 25) playerName = text.substring(0, idx).trim();
-          }
-        }
-
-        let type   = "unknown";
-        const icon = row.querySelector("img[src*='attack']");
-        if (icon) {
-          const src = icon.getAttribute("src");
-          if (src.includes("attack_small"))                            type = "peq";
-          else if (src.includes("attack_medium"))                      type = "med";
-          else if (src.includes("attack_large"))                       type = "grd";
-          else if (src.includes("snob") || src.includes("attack_snob")) type = "nob";
-        }
-        commandsData.push({ player: playerName, type });
+        const playerLink = tr.querySelector('td:nth-child(3) a');
+        const player = playerLink ? playerLink.textContent.trim() : 'Desconhecido';
+        commands.push({ type, player });
       });
-      return commandsData;
+      return commands;
     } catch (e) {
       return [];
     }
   }
 
-  async function processOpVerification(coordsArray, btnElement, containerElement, countReturns) {
-    btnElement.style.opacity   = "0.7";
-    btnElement.disabled        = true;
-    containerElement.innerHTML = "";
+  async function processOpVerification(coords, btn, resultsContainer, countReturns) {
+    btn.disabled = true;
+    btn.textContent = "Verificando...";
+    resultsContainer.innerHTML = "<p style='color:#cbd5e1;'>Buscando dados...</p>";
 
-    const progressContainer = document.getElementById("onix-progress-container");
-    const progressBar       = document.getElementById("onix-progress-bar");
-    progressContainer.style.display = "block";
-    progressBar.style.width         = "0%";
-
-    let resultados = {};
-
-    for (let i = 0; i < coordsArray.length; i++) {
-      const coord = coordsArray[i];
-      btnElement.textContent = `Lendo ${i + 1} de ${coordsArray.length}...`;
-      const villageId = await getVillageIdByCoord(coord);
-      if (villageId) {
-        const commands = await fetchCommandsForVillage(villageId, countReturns);
-        commands.forEach((cmd) => {
-          if (!resultados[cmd.player]) resultados[cmd.player] = { peq: 0, med: 0, grd: 0, nob: 0 };
-          if (resultados[cmd.player][cmd.type] !== undefined) resultados[cmd.player][cmd.type]++;
+    const allResults = {};
+    for (const coord of coords) {
+      const vid = await getVillageIdByCoord(coord);
+      if (vid) {
+        const cmds = await fetchCommandsForVillage(vid);
+        cmds.forEach(c => {
+          if (!allResults[c.player]) allResults[c.player] = { peq: 0, med: 0, grd: 0, nob: 0 };
+          allResults[c.player][c.type]++;
         });
       }
-      progressBar.style.width = `${((i + 1) / coordsArray.length) * 100}%`;
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 300));
     }
 
-    renderResults(resultados, containerElement);
-    btnElement.textContent     = "Verificar";
-    btnElement.style.opacity   = "1";
-    btnElement.disabled        = false;
-
-    setTimeout(() => {
-      progressContainer.style.display = "none";
-      progressBar.style.width         = "0%";
-    }, 600);
-  }
-
-  function renderResults(resultsMap, container) {
-    const players = Object.keys(resultsMap);
+    resultsContainer.innerHTML = "";
+    const players = Object.keys(allResults).sort();
     if (players.length === 0) {
-      container.innerHTML = `<div style="color:#cbd5e1;grid-column:1/-1;text-align:center;padding:20px;">Nenhum comando encontrado para estas coordenadas.</div>`;
-      return;
+      resultsContainer.innerHTML = "<p style='color:#94a3b8;'>Nenhum ataque encontrado nestas coordenadas.</p>";
+    } else {
+      players.forEach(p => {
+        const r = allResults[p];
+        const div = document.createElement("div");
+        div.className = "onix-result-item";
+        div.innerHTML = `
+          <div class="player-name">${p}</div>
+          <div class="badges">
+            <span class="badge badge-peq">Peq: ${r.peq}</span>
+            <span class="badge badge-med">Méd: ${r.med}</span>
+            <span class="badge badge-grd">Grd: ${r.grd}</span>
+            <span class="badge badge-nob">Nob: ${r.nob}</span>
+          </div>
+        `;
+        resultsContainer.appendChild(div);
+      });
     }
-    container.innerHTML = players.map((player) => {
-      const d = resultsMap[player];
-      return `
-        <div class="onix-card">
-          <div class="onix-card-title">${player}</div>
-          <div class="onix-card-row"><span>🪃 Pequeno ataque</span><span class="value">${d.peq || 0}</span></div>
-          <div class="onix-card-row"><span>🐴 Médio ataque</span><span class="value">${d.med || 0}</span></div>
-          <div class="onix-card-row"><span>⚔️ Grande ataque</span><span class="value">${d.grd || 0}</span></div>
-          <div class="onix-card-row"><span>👑 Ataque nobre</span><span class="value">${d.nob || 0}</span></div>
-        </div>`;
-    }).join("");
+    btn.disabled = false;
+    btn.textContent = "Verificar OP";
   }
 
   function createApp() {
+    const style = document.createElement("style");
+    style.textContent = `
+      #onix-root { position: fixed; z-index: 999999; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+      #onix-btn-open { position: fixed; bottom: 20px; left: 20px; background: #0f172a; color: #00e5ff; border: 2px solid #00e5ff; border-radius: 8px; padding: 10px 16px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 12px rgba(0,229,255,0.2); transition: all 0.2s; }
+      #onix-btn-open:hover { background: #00e5ff; color: #0f172a; }
+      #onix-overlay { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); align-items: center; justify-content: center; }
+      #onix-overlay.show { display: flex; }
+      #onix-modal { background: #0f172a; width: 800px; max-width: 95vw; height: 600px; max-height: 90vh; border-radius: 12px; border: 1px solid #1e293b; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+      .onix-header { background: #1e293b; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+      .onix-header h2 { margin: 0; color: #f8fafc; font-size: 18px; display: flex; align-items: center; gap: 8px; }
+      .onix-header h2 span { color: #00e5ff; }
+      .onix-close { background: transparent; border: none; color: #94a3b8; font-size: 24px; cursor: pointer; transition: color 0.2s; }
+      .onix-close:hover { color: #ef4444; }
+      .onix-tabs { display: flex; background: #1e293b; border-bottom: 1px solid #334155; }
+      .onix-tab-btn { flex: 1; background: transparent; border: none; color: #94a3b8; padding: 12px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; border-bottom: 2px solid transparent; }
+      .onix-tab-btn:hover:not(.locked) { color: #f8fafc; background: #334155; }
+      .onix-tab-btn.active { color: #00e5ff; border-bottom-color: #00e5ff; background: #0f172a; }
+      .onix-tab-btn.locked { opacity: 0.5; cursor: not-allowed; }
+      .onix-content { flex: 1; overflow-y: auto; padding: 24px; color: #cbd5e1; }
+      .onix-tab-pane { display: none; }
+      .onix-tab-pane.active { display: block; }
+      .onix-license-box { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 20px; text-align: center; }
+      .onix-license-box h3 { margin: 0 0 12px 0; color: #f8fafc; }
+      .onix-license-status-ok { color: #22c55e; font-weight: bold; font-size: 16px; }
+      .onix-license-status-err { color: #ef4444; font-weight: bold; font-size: 16px; }
+      .onix-form-group { margin-bottom: 16px; }
+      .onix-form-group label { display: block; margin-bottom: 8px; color: #94a3b8; font-size: 13px; }
+      .onix-textarea { width: 100%; height: 100px; background: #1e293b; border: 1px solid #334155; border-radius: 6px; color: #f8fafc; padding: 12px; font-family: monospace; resize: vertical; outline: none; }
+      .onix-textarea:focus { border-color: #00e5ff; }
+      .onix-checkbox-label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #cbd5e1; cursor: pointer; }
+      .onix-actions { display: flex; gap: 12px; margin-top: 16px; }
+      .onix-btn { background: #334155; color: #f8fafc; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+      .onix-btn:hover { background: #475569; }
+      .onix-btn-primary { background: #00e5ff; color: #0f172a; }
+      .onix-btn-primary:hover { background: #00c8e0; }
+      .onix-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .onix-results { margin-top: 24px; display: grid; gap: 12px; }
+      .onix-result-item { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 12px; display: flex; justify-content: space-between; align-items: center; }
+      .onix-result-item .player-name { font-weight: bold; color: #f8fafc; }
+      .onix-result-item .badges { display: flex; gap: 8px; }
+      .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+      .badge-peq { background: rgba(34,197,94,0.2); color: #4ade80; }
+      .badge-med { background: rgba(234,179,8,0.2); color: #facc15; }
+      .badge-grd { background: rgba(239,68,68,0.2); color: #f87171; }
+      .badge-nob { background: rgba(168,85,247,0.2); color: #c084fc; }
+      .onix-troops-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: #1e293b; padding: 16px; border-radius: 8px; border: 1px solid #334155; }
+      .onix-troops-header-left { display: flex; flex-direction: column; gap: 4px; }
+      .onix-troops-status { font-size: 13px; color: #94a3b8; }
+      .onix-troops-last-update { font-size: 12px; color: #64748b; }
+      .onix-select { background: #1e293b; border: 1px solid #334155; color: #f8fafc; padding: 10px; border-radius: 6px; width: 100%; outline: none; margin-bottom: 20px; font-size: 14px; }
+      .onix-select:focus { border-color: #00e5ff; }
+      .onix-troops-member-head { font-size: 18px; font-weight: bold; color: #f8fafc; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid #334155; }
+      .onix-troops-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+      .onix-card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 16px; }
+      .onix-card-title { font-weight: bold; color: #00e5ff; margin-bottom: 4px; font-size: 15px; }
+      .onix-card-sub { font-size: 11px; color: #64748b; margin-bottom: 12px; line-height: 1.3; }
+      .onix-card-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; color: #cbd5e1; border-bottom: 1px dashed #334155; padding-bottom: 4px; }
+      .onix-card-row:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+      .onix-card-row .value { font-weight: bold; color: #f8fafc; }
+      .onix-progress-container { width: 100%; background: #334155; border-radius: 4px; height: 6px; margin-top: 8px; overflow: hidden; display: none; }
+      .onix-progress-bar { height: 100%; background: #00e5ff; width: 0%; transition: width 0.3s; }
+      .onix-criteria-box { background: #0f172a; border: 1px solid #1e293b; border-radius: 6px; padding: 12px; margin-bottom: 16px; font-size: 12px; color: #94a3b8; }
+      .onix-criteria-box strong { color: #cbd5e1; }
+      .onix-debug-label { display: block; margin-top: 16px; margin-bottom: 6px; font-size: 12px; color: #94a3b8; }
+      .onix-troops-debug { width: 100%; min-height: 140px; max-height: 220px; resize: vertical; background: #020617; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; padding: 10px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.35; box-sizing: border-box; }
+    `;
+    document.head.appendChild(style);
+
     const root = document.createElement("div");
     root.id = ROOT_ID;
-    document.body.appendChild(root);
-
     root.innerHTML = `
-      <style>
-        #${ROOT_ID} * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-
-        #${ROOT_ID} .onix-btn-open {
-          position: fixed; top: 50px; left: 20px; z-index: 999999;
-          background: #0b0f19; color: #00f2fe;
-          border: 1px solid #00f2fe; border-radius: 12px;
-          padding: 14px 20px; font-weight: bold; font-size: 14px; cursor: pointer;
-          box-shadow: 0 0 15px rgba(0,242,254,0.2); transition: all 0.3s ease;
-        }
-        #${ROOT_ID} .onix-btn-open:hover {
-          background: #00f2fe; color: #0b0f19;
-          box-shadow: 0 0 25px rgba(0,242,254,0.5); transform: translateY(-2px);
-        }
-
-        #${ROOT_ID} .onix-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 999998; display: none; align-items: center; justify-content: center; padding: 20px; backdrop-filter: blur(4px); }
-        #${ROOT_ID} .onix-overlay.show { display: flex; }
-
-        #${ROOT_ID} .onix-modal { width: min(900px, 100%); max-height: 90vh; display: flex; flex-direction: column; background: #121a28; color: #f1f5f9; border-radius: 16px; border: 1px solid #2a3548; box-shadow: 0 25px 50px rgba(0,0,0,0.65); overflow: hidden; }
-
-        #${ROOT_ID} .onix-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; background: #0a101c; border-bottom: 1px solid #2a3548; flex-wrap: wrap; gap: 8px; }
-        #${ROOT_ID} .onix-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
-        #${ROOT_ID} .onix-tab-btn { background: transparent; color: #9aa8bc; border: 1px solid transparent; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-weight: 600; font-size: 13px; transition: all 0.2s; }
-        #${ROOT_ID} .onix-tab-btn:hover:not(.locked) { background: #161f2e; color: #f8fafc; }
-        #${ROOT_ID} .onix-tab-btn.active { background: #2a3548; color: #f8fafc; border-color: #3d4f66; }
-        #${ROOT_ID} .onix-tab-btn.locked { opacity: 0.4; cursor: not-allowed; }
-        #${ROOT_ID} .onix-tab-btn.locked::after { content: " 🔒"; }
-
-        #${ROOT_ID} .onix-btn-close { background: #2a3548; color: #d8dee9; border: 1px solid #3d4f66; padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
-        #${ROOT_ID} .onix-btn-close:hover { background: #ef4444; color: #fff; border-color: #dc2626; }
-
-        #${ROOT_ID} .onix-progress-container { width: 100%; height: 3px; background: #2a3548; display: none; }
-        #${ROOT_ID} .onix-progress-bar { height: 100%; width: 0%; background: #7c3aed; transition: width 0.3s ease; }
-
-        #${ROOT_ID} .onix-body { padding: 20px; overflow-y: auto; max-height: calc(90vh - 60px); }
-        #${ROOT_ID} .onix-tab-content { display: none; animation: onixFade 0.2s ease; }
-        #${ROOT_ID} .onix-tab-content.active { display: block; }
-        @keyframes onixFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-
-        #${ROOT_ID} label.onix-main-label { display: block; font-size: 11px; font-weight: 700; letter-spacing: 1.2px; color: #aeb9ca; margin-bottom: 8px; text-transform: uppercase; }
-        #${ROOT_ID} textarea { width: 100%; background: #080d16; color: #eef2f7; border: 1px solid #2a3548; border-radius: 8px; padding: 10px 12px; outline: none; min-height: 90px; resize: vertical; font-family: monospace; font-size: 13px; }
-        #${ROOT_ID} textarea:focus { border-color: #4b5d78; }
-
-        #${ROOT_ID} .onix-checkbox-container { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-        #${ROOT_ID} .onix-checkbox-container input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: #7c3aed; }
-        #${ROOT_ID} .onix-checkbox-container label { color: #d8dee9; font-size: 13px; cursor: pointer; }
-
-        #${ROOT_ID} .onix-actions-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
-        #${ROOT_ID} .onix-btn-action { padding: 7px 18px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; background: #7c3aed; color: #fff; border: 1px solid #6d28d9; transition: all 0.2s; }
-        #${ROOT_ID} .onix-btn-action:hover { background: #6d28d9; }
-        #${ROOT_ID} .onix-btn-action:disabled { background: #2a3548; color: #9aa8bc; cursor: not-allowed; border-color: #2a3548; }
-        #${ROOT_ID} .onix-btn-clear { padding: 7px 18px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px; background: #0f1624; color: #d8dee9; border: 1px solid #2a3548; }
-        #${ROOT_ID} .onix-btn-clear:hover { background: #1a2434; }
-
-        #${ROOT_ID} .onix-results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; margin-top: 20px; }
-        #${ROOT_ID} .onix-card { background: #080d16; border: 1px solid #2a3548; border-radius: 12px; padding: 14px; }
-        #${ROOT_ID} .onix-card-title { font-size: 13px; font-weight: 700; color: #f8fafc; margin-bottom: 10px; border-bottom: 1px solid #2a3548; padding-bottom: 8px; }
-        #${ROOT_ID} .onix-card-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; margin-bottom: 6px; color: #cbd5e1; }
-        #${ROOT_ID} .onix-card-row span.value { color: #f8fafc; font-weight: 700; background: #121a28; padding: 2px 8px; border-radius: 4px; border: 1px solid #2a3548; min-width: 28px; text-align: center; }
-
-        #${ROOT_ID} .onix-license-box { background: #080d16; padding: 30px; border-radius: 10px; border: 1px dashed #2a3548; text-align: center; }
-        #${ROOT_ID} .onix-license-box h3 { color: #f8fafc; margin: 0 0 12px; text-transform: uppercase; font-size: 15px; letter-spacing: 1px; }
-        #${ROOT_ID} .onix-license-box p { color: #aeb9ca; margin: 4px 0; font-size: 13px; }
-        #${ROOT_ID} .onix-license-box p strong { color: #f1f5f9; }
-        #${ROOT_ID} .onix-license-status-ok  { color: #22c55e !important; font-weight: 700; font-size: 14px !important; margin-bottom: 10px !important; }
-        #${ROOT_ID} .onix-license-status-err { color: #ef4444 !important; font-weight: 700; font-size: 14px !important; margin-bottom: 10px !important; }
-
-        #${ROOT_ID} .onix-start-notice {
-          margin-top: 16px;
-          padding: 12px 14px;
-          border-radius: 8px;
-          border: 1px solid #2a3548;
-          background: #0a101c;
-          font-size: 12px;
-          color: #94a3b8;
-          line-height: 1.5;
-          text-align: center;
-        }
-
-        #${ROOT_ID} .onix-info-box { background: #1a2332; border-left: 3px solid #7c3aed; padding: 12px 14px; border-radius: 4px; margin-bottom: 14px; }
-        #${ROOT_ID} .onix-info-box p { margin: 2px 0; font-size: 12px; color: #aeb9ca; line-height: 1.5; }
-
-        #${ROOT_ID} .onix-last-update { font-size: 12px; color: #64748b; align-self: center; }
-        #${ROOT_ID} .onix-troops-status { font-size: 13px; margin: 10px 0; min-height: 18px; }
-        #${ROOT_ID} .onix-troops-label { font-size: 13px; color: #e5e7eb; align-self: center; }
-        #${ROOT_ID} .onix-member-select { padding: 6px 10px; border-radius: 6px; border: 1px solid #2a3548; background: #020617; color: #e5e7eb; font-size: 13px; min-width: 200px; outline: none; }
-        #${ROOT_ID} .onix-member-select:focus { border-color: #7c3aed; }
-
-        #${ROOT_ID} .onix-troops-filter-panel {
-          margin-top: 14px;
-          padding: 12px 14px;
-          border-radius: 10px;
-          border: 1px dashed #3d4f66;
-          background: #0a101c;
-        }
-        #${ROOT_ID} .onix-troops-filter-head {
-          font-size: 11px;
-          font-weight: 700;
-          letter-spacing: 1px;
-          text-transform: uppercase;
-          color: #64748b;
-          margin-bottom: 6px;
-        }
-        #${ROOT_ID} .onix-troops-filter-msg { margin: 0; font-size: 13px; color: #94a3b8; font-style: italic; }
-
-        #${ROOT_ID} .onix-troops-member-head {
-          margin-top: 14px;
-          font-size: 14px;
-          font-weight: 700;
-          color: #f8fafc;
-          letter-spacing: 0.02em;
-        }
-        #${ROOT_ID} .onix-troops-cards {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 12px;
-          margin-top: 10px;
-        }
-        #${ROOT_ID} .onix-card-sub {
-          font-size: 11px;
-          color: #64748b;
-          margin: -4px 0 10px;
-          line-height: 1.35;
-        }
-        @media (max-width: 780px) {
-          #${ROOT_ID} .onix-troops-cards { grid-template-columns: 1fr; }
-        }
-      </style>
-
-      <button class="onix-btn-open" id="onix-btn-open">Onix Tools</button>
-
-      <div class="onix-overlay" id="onix-overlay">
-        <div class="onix-modal">
+      <button id="onix-btn-open">Onix Tools</button>
+      <div id="onix-overlay">
+        <div id="onix-modal">
           <div class="onix-header">
-            <div class="onix-tabs">
-              <button class="onix-tab-btn active" data-tab="licenca">Licença</button>
-              <button class="onix-tab-btn" data-tab="verificar">Verificar OP</button>
-              <button class="onix-tab-btn" data-tab="organizar">Organizar OP</button>
-              <button class="onix-tab-btn" data-tab="tropas">Verificar Tropas</button>
-            </div>
-            <button class="onix-btn-close" id="onix-btn-close">Fechar</button>
+            <h2><span>⚡</span> Onix Tools</h2>
+            <button class="onix-close">&times;</button>
           </div>
-
-          <div class="onix-progress-container" id="onix-progress-container">
-            <div class="onix-progress-bar" id="onix-progress-bar"></div>
+          <div class="onix-tabs">
+            <button class="onix-tab-btn active" data-tab="licenca">Licença</button>
+            <button class="onix-tab-btn locked" data-tab="verificar">Verificar OP</button>
+            <button class="onix-tab-btn locked" data-tab="tropas">Verificar Tropas</button>
           </div>
-
-          <div class="onix-body">
-            <div class="onix-tab-content active" id="tab-licenca">
-              <div class="onix-license-box" id="onix-license-box">
+          <div class="onix-content">
+            <div id="tab-licenca" class="onix-tab-pane active">
+              <div class="onix-license-box" id="onix-license-info">
                 <h3>Status da Licença</h3>
                 <p>Verificando...</p>
               </div>
-              <p class="onix-start-notice">
-                O carregamento inicial pode demorar até 50 segundos se o servidor estiver 'desacordado', como é um projeto hospedado gratuitamente em fase de testes.
-              </p>
             </div>
-
-            <div class="onix-tab-content" id="tab-verificar">
-              <label class="onix-main-label">Coordenadas verificadas</label>
-              <textarea id="onix-coords-input" placeholder="Cole as coordenadas aqui"></textarea>
-              <div class="onix-checkbox-container">
-                <input type="checkbox" id="onix-check-returns">
-                <label for="onix-check-returns">Contar comandos retornando (ignorados por padrão)</label>
+            <div id="tab-verificar" class="onix-tab-pane">
+              <div class="onix-form-group">
+                <label>Coordenadas (cole o texto, o script extrai automaticamente)</label>
+                <textarea id="onix-coords-input" class="onix-textarea" placeholder="Ex: 555|666 444|333"></textarea>
               </div>
-              <div class="onix-actions-row">
-                <button class="onix-btn-action" id="onix-btn-verificar">Verificar</button>
-                <button class="onix-btn-clear" id="onix-btn-clear">Limpar</button>
+              <div class="onix-form-group">
+                <label class="onix-checkbox-label">
+                  <input type="checkbox" id="onix-check-returns">
+                  Contar retornos (ataques voltando)
+                </label>
               </div>
-              <div class="onix-results-grid" id="onix-results-container"></div>
+              <div class="onix-actions">
+                <button id="onix-btn-verificar" class="onix-btn onix-btn-primary">Verificar OP</button>
+                <button id="onix-btn-clear" class="onix-btn">Limpar</button>
+              </div>
+              <div id="onix-results-container" class="onix-results"></div>
             </div>
-
-            <div class="onix-tab-content" id="tab-organizar">
-              <div class="onix-info-box">
-                <p><strong style="color:#f1f5f9;">Organizar OP</strong> — Funcionalidade em desenvolvimento.</p>
+            <div id="tab-tropas" class="onix-tab-pane">
+              <div class="onix-criteria-box">
+                <div><strong>Dados:</strong> fetch da aba <strong>Tribo → Membros → Tropas</strong> (totais por aldeia, incluindo tropas fora da aldeia, como no jogo).</div>
+                <div><strong>Pop. usada (por aldeia):</strong> 3600 + custo das tropas da linha (lan/esp/bar/arq 1 · scout 2 · cl 4 · carq 5 · cpes 6 · ari 5 · cat 8 · pal 10 · nob 100 · milícia 0)</div>
+                <div style="margin-top:6px;"><strong>Full Ataque:</strong> Pop. &gt; 22.000 · Bárbaros &gt; 1000 · Cav. leve ≥ 500 · Nobres = 0 · Aríetes &lt; 400</div>
+                <div style="margin-top:4px;"><strong>Full Defesa:</strong> Pop. &gt; 22.000 · Lanças &gt; 500 · Espadas &gt; 500</div>
+                <div style="margin-top:4px;"><strong>Papa Strike:</strong> Pop. &gt; 22.000 · Bárbaros &gt; 500 · Cav. leve ≥ 500 · Aríetes &gt; 400</div>
               </div>
-            </div>
-
-            <div class="onix-tab-content" id="tab-tropas">
-              <div class="onix-info-box">
-                <p><strong style="color:#f1f5f9;">Critérios p/ Full Ataque:</strong><br>
-                Pop. usada &gt; 23.000 · Bárbaros ≥ 1.000 · Cav. leve ≥ 500 · 0 nobres · Aríetes &lt; 400</p>
-                <p style="margin-top:10px;"><strong style="color:#f1f5f9;">Critérios p/ Full Defesa:</strong><br>
-                Pop. usada &gt; 23.000 · Lanceiros &gt; 1000 · Espadachins &gt; 1000</p>
-                <p style="margin-top:10px;"><strong style="color:#f1f5f9;">Critérios p/ Papa Strike:</strong><br>
-                Pop. usada &gt; 23.000 · Bárbaros ≥ 1.000 · Cav. leve ≥ 500 · 0 nobres · Aríetes &gt; 600</p>
-                <p style="margin-top:10px;color:#94a3b8;font-size:12px;">
-                  <strong style="color:#e2e8f0;">Pop. usada</strong> (por aldeia, a partir dos números da aba <strong style="color:#e2e8f0;">Membros → Tropas</strong>): <strong style="color:#e2e8f0;">3600</strong> (edifícios) + soma das unidades mostradas na tabela:
-                  lança · espadachim · arqueiro · bárbaro <strong>1</strong> · batedor <strong>2</strong> · cav. leve <strong>4</strong> · cav. arqueira <strong>5</strong> · cav. pesada <strong>6</strong> · aríete <strong>5</strong> · catapulta <strong>8</strong> · paladino <strong>10</strong> · nobre <strong>100</strong>.
-                  Nos cards, <strong style="color:#e2e8f0;">Pop. usada (soma)</strong> = soma dessa pop. em todas as aldeias do recorte.
-                </p>
-                <p style="margin-top:10px;color:#fbbf24;font-size:12px;">
-                  <strong style="color:#fef3c7;">Obrigatório:</strong> abra <strong style="color:#fef3c7;">Tribo → Membros → Tropas</strong> no jogo antes de usar <strong style="color:#fef3c7;">Buscar Tropas</strong> (o script usa <code style="color:#fef3c7;">mode=members_troops</code> por jogador).
-                </p>
+              <div class="onix-troops-header">
+                <div class="onix-troops-header-left">
+                  <div class="onix-troops-status" id="onix-troops-status">Clique em analisar para buscar no jogo.</div>
+                  <div class="onix-troops-last-update" id="onix-troops-last-update"></div>
+                  <div class="onix-progress-container" id="onix-progress-container">
+                    <div class="onix-progress-bar" id="onix-progress-bar"></div>
+                  </div>
+                </div>
+                <button id="onix-btn-fetch-troops" class="onix-btn onix-btn-primary">Analisar tropas (tribo)</button>
               </div>
-              <div class="onix-actions-row">
-                <button class="onix-btn-action" id="onix-btn-fetch-troops">🔄 Buscar Tropas</button>
-                <span class="onix-last-update" id="onix-troops-last-update">Nunca atualizado</span>
-              </div>
-              <div class="onix-troops-status" id="onix-troops-status"></div>
-              <div class="onix-actions-row" style="margin-top:8px;">
-                <label for="onix-member-select" class="onix-troops-label">Selecionar membro:</label>
-                <select id="onix-member-select" class="onix-member-select"></select>
-              </div>
-              <div class="onix-troops-filter-panel" aria-label="Filtros (em construção)">
-                <div class="onix-troops-filter-head">Filtros</div>
-                <p class="onix-troops-filter-msg">Em construção.</p>
-              </div>
+              <label class="onix-debug-label" style="margin-top:0;">Totais da tribo (somente leitura)</label>
+              <textarea id="onix-tribe-summary" class="onix-troops-debug" readonly spellcheck="false" style="min-height:88px;max-height:120px;margin-bottom:12px;"></textarea>
+              <select id="onix-member-select" class="onix-select">
+                <option value="">Execute a análise para listar membros</option>
+              </select>
               <div id="onix-member-info"></div>
             </div>
           </div>
         </div>
-      </div>`;
+      </div>
+    `;
+    document.body.appendChild(root);
 
-    const overlay          = root.querySelector("#onix-overlay");
-    const btnOpen          = root.querySelector("#onix-btn-open");
-    const btnClose         = root.querySelector("#onix-btn-close");
-    const tabBtns          = root.querySelectorAll(".onix-tab-btn");
-    const tabContents      = root.querySelectorAll(".onix-tab-content");
-    const btnVerificar     = root.querySelector("#onix-btn-verificar");
-    const btnClear         = root.querySelector("#onix-btn-clear");
-    const resultsContainer = root.querySelector("#onix-results-container");
-    const coordsInput      = root.querySelector("#onix-coords-input");
-    const checkReturns     = root.querySelector("#onix-check-returns");
-    const licenseBox       = root.querySelector("#onix-license-box");
-    const tabLicencaBtn    = root.querySelector('.onix-tab-btn[data-tab="licenca"]');
-    const btnFetchTroops   = root.querySelector("#onix-btn-fetch-troops");
-    const troopsStatus     = root.querySelector("#onix-troops-status");
-    const troopsLastUpdate = root.querySelector("#onix-troops-last-update");
-    const memberSelect     = root.querySelector("#onix-member-select");
-    const memberInfo       = root.querySelector("#onix-member-info");
+    const btnOpen          = document.getElementById("onix-btn-open");
+    const overlay          = document.getElementById("onix-overlay");
+    const btnClose         = overlay.querySelector(".onix-close");
+    const tabBtns          = overlay.querySelectorAll(".onix-tab-btn");
+    const tabContents      = overlay.querySelectorAll(".onix-tab-pane");
+    const licenseBox       = document.getElementById("onix-license-info");
+    const tabLicencaBtn    = overlay.querySelector('[data-tab="licenca"]');
+    const coordsInput      = document.getElementById("onix-coords-input");
+    const btnVerificar     = document.getElementById("onix-btn-verificar");
+    const btnClear         = document.getElementById("onix-btn-clear");
+    const checkReturns     = document.getElementById("onix-check-returns");
+    const resultsContainer = document.getElementById("onix-results-container");
+    const btnFetchTroops   = document.getElementById("onix-btn-fetch-troops");
+    const troopsStatus     = document.getElementById("onix-troops-status");
+    const troopsLastUpdate = document.getElementById("onix-troops-last-update");
+    const memberSelect     = document.getElementById("onix-member-select");
+    const memberInfo       = document.getElementById("onix-member-info");
+    const tribeSummaryEl   = document.getElementById("onix-tribe-summary");
 
-    let licenseValid    = false;
-    let lastTroopsCache = [];
+    let licenseValid = false;
+    let troopsAnalysisState = null;
 
     function lockTabs() {
-      tabBtns.forEach((b) => { if (b.dataset.tab !== "licenca") b.classList.add("locked"); });
+      tabBtns.forEach((b) => {
+        if (b.dataset.tab !== "licenca") b.classList.add("locked");
+      });
     }
 
     function unlockTabs() {
@@ -984,17 +683,17 @@
 
     function renderLicenseBox(info) {
       if (info.valid) {
-        const expDate = new Date(info.expiresAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+        const exp = new Date(info.expiresAt).toLocaleDateString("pt-BR");
         licenseBox.innerHTML = `
           <h3>Status da Licença</h3>
-          <p class="onix-license-status-ok">✓ Licença ativa</p>
-          <p>Tribo ID: <strong>${info.tribeTag}</strong></p>
-          <p>Válida até: <strong>${expDate}</strong></p>`;
+          <p class="onix-license-status-ok">✓ Licença Ativa</p>
+          <p>Válida até: <strong>${exp}</strong></p>
+          <p style="margin-top:8px;">Tribo ID: <strong>${info.tribeTag}</strong></p>`;
       } else {
         const msgs = {
-          no_tribe:      "Não foi possível identificar a tribo. Abra uma aldeia e recarregue a página.",
-          not_found:     "Nenhuma licença encontrada para esta tribo. Entre em contato para adquirir.",
-          expired:       "A licença desta tribo está expirada. Entre em contato para renovar.",
+          no_tribe: "Você precisa estar em uma tribo para usar o Onix Tools.",
+          not_found: "Sua tribo não possui uma licença ativa.",
+          expired: "A licença da sua tribo expirou. Entre em contato para renovar.",
           network_error: "Erro ao conectar ao servidor. Verifique sua conexão e tente novamente.",
         };
         const msg = msgs[info.reason] || "Licença inválida ou não configurada.";
@@ -1031,15 +730,10 @@
 
       if (licenseValid) {
         unlockTabs();
-        const tribeId = getTribeTag();
-        if (tribeId) {
-          const data = await getTroopsData(tribeId);
-          lastTroopsCache = data.troops || [];
-          if (data.lastUpdated) {
-            troopsLastUpdate.textContent = `Última atualização: ${new Date(data.lastUpdated).toLocaleString("pt-BR")}`;
-          }
-          renderTroopsMemberSelect(lastTroopsCache, memberSelect, memberInfo);
-        }
+        memberSelect.innerHTML = `<option value="">Execute &quot;Analisar tropas (tribo)&quot; nesta aba</option>`;
+        memberInfo.innerHTML = "";
+        if (tribeSummaryEl) tribeSummaryEl.value = "";
+        troopsLastUpdate.textContent = "";
       } else {
         lockTabs();
       }
@@ -1091,64 +785,76 @@
       if (!members || members.length === 0) {
         troopsStatus.style.color = "#ef4444";
         troopsStatus.textContent =
-          "Nenhum membro encontrado. Abra Tribo → Membros → Tropas (ou Membros) no jogo e tente de novo.";
+          "Nenhum membro encontrado. Abra Tribo → Membros → Tropas no jogo e tente de novo.";
         return;
       }
 
-      const tribeId = getTribeTag();
-      if (!tribeId) {
-        troopsStatus.style.color = "#ef4444";
-        troopsStatus.textContent = "Erro ao obter ID da tribo.";
-        return;
-      }
-
-      btnFetchTroops.disabled    = true;
-      btnFetchTroops.textContent = "⏳ Buscando...";
+      btnFetchTroops.disabled = true;
+      btnFetchTroops.textContent = "Analisando...";
 
       const progressContainer = document.getElementById("onix-progress-container");
-      const progressBar       = document.getElementById("onix-progress-bar");
+      const progressBar = document.getElementById("onix-progress-bar");
       progressContainer.style.display = "block";
-      progressBar.style.width         = "0%";
+      progressBar.style.width = "0%";
 
-      const allTroopsData = [];
-      let erros = 0;
+      const memberRows = [];
+      let parseErrors = 0;
+      const tribe = {
+        memberCount: 0,
+        villages: 0,
+        fullAtk: 0,
+        fullDef: 0,
+        papaStrike: 0,
+      };
 
       for (let i = 0; i < members.length; i++) {
         const member = members[i];
         troopsStatus.style.color = "#cbd5e1";
-        troopsStatus.textContent = `Buscando ${i + 1}/${members.length}: ${member.name}...`;
+        troopsStatus.textContent = `Membro ${i + 1}/${members.length}: ${member.name}...`;
 
-        const villages = await fetchMemberTroops(member.id, member.name, villageId);
-        if (villages.length === 0) erros++;
-        allTroopsData.push(...villages);
+        let records = [];
+        try {
+          const html = await fetchMembersTroopsHtml(villageId, member.id);
+          records = parseMembersTroopsHtml(html, member.id, member.name);
+        } catch (e) {
+          console.error("Onix members_troops fetch", member.id, e);
+        }
+        if (records.length === 0) parseErrors++;
+
+        const analyze = analyzeVillageRecords(records);
+        memberRows.push({
+          memberId: member.id,
+          memberName: member.name,
+          records,
+          analyze,
+        });
+
+        tribe.memberCount++;
+        tribe.villages += analyze.villages;
+        tribe.fullAtk += analyze.fullAtk;
+        tribe.fullDef += analyze.fullDef;
+        tribe.papaStrike += analyze.papaStrike;
 
         progressBar.style.width = `${((i + 1) / members.length) * 100}%`;
-        await new Promise((r) => setTimeout(r, 400));
+        await new Promise((r) => setTimeout(r, 350));
       }
-
-      troopsStatus.textContent = `Enviando ${allTroopsData.length} aldeias para o servidor...`;
-
-      const result = await uploadTroops({ tribeId, troopsData: allTroopsData });
 
       setTimeout(() => {
         progressContainer.style.display = "none";
-        progressBar.style.width         = "0%";
-      }, 600);
+        progressBar.style.width = "0%";
+      }, 400);
 
-      if (result.ok) {
-        troopsStatus.style.color = "#22c55e";
-        troopsStatus.textContent = `✓ ${result.count} aldeias atualizadas.${erros > 0 ? ` (${erros} membros sem dados)` : ""}`;
-        troopsLastUpdate.textContent = `Última atualização: ${new Date().toLocaleString("pt-BR")}`;
-        const data = await getTroopsData(tribeId);
-        lastTroopsCache = data.troops || [];
-        renderTroopsMemberSelect(lastTroopsCache, memberSelect, memberInfo);
-      } else {
-        troopsStatus.style.color = "#ef4444";
-        troopsStatus.textContent = `✗ Erro ao salvar: ${result.error || "desconhecido"}`;
-      }
+      troopsAnalysisState = { members: memberRows, tribe, analyzedAt: Date.now() };
+      wireTroopsAnalysisSelect(troopsAnalysisState, memberSelect, memberInfo, tribeSummaryEl);
 
-      btnFetchTroops.disabled    = false;
-      btnFetchTroops.textContent = "🔄 Buscar Tropas";
+      troopsStatus.style.color = "#22c55e";
+      troopsStatus.textContent =
+        `Concluído: ${tribe.villages} aldeias em ${tribe.memberCount} membros.` +
+        (parseErrors > 0 ? ` (${parseErrors} sem tabela/sem aldeias)` : "");
+      troopsLastUpdate.textContent = `Analisado em: ${new Date().toLocaleString("pt-BR")}`;
+
+      btnFetchTroops.disabled = false;
+      btnFetchTroops.textContent = "Analisar tropas (tribo)";
     });
   }
 
